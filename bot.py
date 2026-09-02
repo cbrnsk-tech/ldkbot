@@ -124,6 +124,25 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # /zp
 # --------------------------------------------------------------------------
 
+def _format_salary_entry(fio: str, entry: dict) -> str:
+    return (
+        f"Данные по {fio} за {entry['period']}:\n\n"
+        f"Оклад: {entry['oklad']}\n"
+        f"Премия/день с НДС: {entry['premiya_den']}\n"
+        f"Итого премия с НДС: {entry['itogo_premiya']}"
+    )
+
+
+def _months_keyboard(history: list[dict]) -> Optional[InlineKeyboardMarkup]:
+    """Кнопки для остальных месяцев (кроме текущего первого — самого свежего).
+    Ограничение в 12 штук — чтобы клавиатура не была бесконечной."""
+    other_months = history[1:13]
+    if not other_months:
+        return None
+    rows = [[InlineKeyboardButton(e["period"], callback_data=f"zp:{e['period']}")] for e in other_months]
+    return InlineKeyboardMarkup(rows)
+
+
 async def salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     fio = get_driver_fio(update.effective_user.id)
     if not fio:
@@ -132,7 +151,7 @@ async def salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text("Ищу данные...")
     try:
-        info = sheets_service.get_salary_info(fio)
+        history = sheets_service.get_salary_history(fio)
     except sheets_service.DriverNotFound:
         await update.message.reply_text(
             f"Не нашёл в таблице строку с ФИО «{fio}».\n"
@@ -145,12 +164,36 @@ async def salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Не удалось получить данные: {exc}")
         return
 
+    latest = history[0]
     await update.message.reply_text(
-        f"Данные по {fio}:\n\n"
-        f"Оклад: {info['oklad']}\n"
-        f"Проценты: {info['procenty']}\n"
-        f"Премия: {info['premiya']}"
+        _format_salary_entry(fio, latest),
+        reply_markup=_months_keyboard(history),
     )
+
+
+async def salary_month_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    fio = get_driver_fio(update.effective_user.id)
+    if not fio:
+        await query.message.reply_text("Сначала выполните /start и введите ваше ФИО.")
+        return
+
+    period = query.data.split(":", 1)[1]
+    try:
+        history = sheets_service.get_salary_history(fio)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Ошибка при обращении к таблице зарплат")
+        await query.message.reply_text(f"Не удалось получить данные: {exc}")
+        return
+
+    entry = next((e for e in history if e["period"] == period), None)
+    if entry is None:
+        await query.message.reply_text("Не нашёл данные за этот период.")
+        return
+
+    await query.message.reply_text(_format_salary_entry(fio, entry))
 
 
 # --------------------------------------------------------------------------
@@ -160,15 +203,20 @@ async def salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 (
     VEHICLE,
     ODOMETER,
+    FUEL_LEVEL,
     PHOTO,
     DAMAGE_YN,
     DAMAGE_DESC,
     EQUIPMENT,
     COMMENT,
-) = range(10, 17)
+) = range(10, 18)
 
 YES_NO_KEYBOARD = ReplyKeyboardMarkup(
     [["Да", "Нет"]], one_time_keyboard=True, resize_keyboard=True
+)
+
+FUEL_LEVEL_KEYBOARD = ReplyKeyboardMarkup(
+    [[level] for level in config.FUEL_LEVELS], one_time_keyboard=True, resize_keyboard=True
 )
 
 
@@ -218,6 +266,17 @@ async def inspection_odometer(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ODOMETER
 
     context.user_data["odometer"] = int(raw)
+    await update.message.reply_text("Уровень топлива:", reply_markup=FUEL_LEVEL_KEYBOARD)
+    return FUEL_LEVEL
+
+
+async def inspection_fuel_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    level = update.message.text.strip()
+    if level not in config.FUEL_LEVELS:
+        await update.message.reply_text("Пожалуйста, выберите вариант с клавиатуры.")
+        return FUEL_LEVEL
+
+    context.user_data["fuel_level"] = level
     return await _ask_next_photo(update, context)
 
 
@@ -231,10 +290,20 @@ async def _ask_next_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return DAMAGE_YN
 
     point = config.PHOTO_POINTS[idx]
-    await update.message.reply_text(
-        f"Фото {idx + 1}/{len(config.PHOTO_POINTS)}: {point['title']}",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+
+    reference_photo = config.REFERENCE_PHOTOS_DIR / f"{point['id']}.jpg"
+    if reference_photo.exists():
+        await update.message.reply_photo(
+            photo=reference_photo.open("rb"),
+            caption=f"Пример: {point['title']}",
+        )
+
+    hint = point.get("hint", "")
+    text = f"Фото {idx + 1}/{len(config.PHOTO_POINTS)}: {point['title']}"
+    if hint:
+        text += f"\n({hint})"
+
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardRemove())
     return PHOTO
 
 
@@ -393,6 +462,7 @@ async def _finish_inspection(update: Update, context: ContextTypes.DEFAULT_TYPE)
     fio = context.user_data["fio"]
     vehicle_number = context.user_data["vehicle"]
     odometer = context.user_data["odometer"]
+    fuel_level = context.user_data.get("fuel_level", "—")
     session_dir: Path = context.user_data["session_dir"]
     photo_results = context.user_data["photo_results"]
     auto_flagged = context.user_data["auto_flagged"]
@@ -407,6 +477,7 @@ async def _finish_inspection(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "driver": fio,
         "vehicle": vehicle_number,
         "odometer_km": odometer,
+        "fuel_level": fuel_level,
         "datetime": datetime.now().isoformat(timespec="seconds"),
         "photos": photo_results,
         "auto_flagged": auto_flagged,
@@ -423,7 +494,10 @@ async def _finish_inspection(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         logger.exception("Не удалось записать лог осмотра в таблицу")
 
-    lines = [f"Осмотр завершён. Машина: {vehicle_number}, пробег: {odometer} км\n"]
+    lines = [
+        f"Осмотр завершён. Машина: {vehicle_number}, пробег: {odometer} км, "
+        f"топливо: {fuel_level}\n"
+    ]
 
     if damages:
         lines.append("Повреждения (со слов водителя):")
@@ -498,6 +572,7 @@ def main() -> None:
         states={
             VEHICLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, inspection_vehicle)],
             ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, inspection_odometer)],
+            FUEL_LEVEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, inspection_fuel_level)],
             PHOTO: [MessageHandler(filters.PHOTO, inspection_photo)],
             DAMAGE_YN: [MessageHandler(filters.TEXT & ~filters.COMMAND, inspection_damage_yn)],
             DAMAGE_DESC: [MessageHandler(filters.PHOTO | filters.TEXT, inspection_damage_desc)],
@@ -510,6 +585,7 @@ def main() -> None:
     app.add_handler(reg_conv)
     app.add_handler(inspection_conv)
     app.add_handler(CommandHandler("zp", salary))
+    app.add_handler(CallbackQueryHandler(salary_month_callback, pattern=r"^zp:"))
 
     logger.info("Бот запущен")
     app.run_polling()

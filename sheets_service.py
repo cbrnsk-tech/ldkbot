@@ -41,7 +41,18 @@ def _normalize(text: str) -> str:
 def _get_client() -> gspread.Client:
     if config.GOOGLE_CREDS_JSON:
         # ключ передан целиком через переменную окружения (Railway/Render)
-        info = json.loads(config.GOOGLE_CREDS_JSON)
+        raw = config.GOOGLE_CREDS_JSON.strip()
+        if not raw.startswith("{"):
+            # частая ошибка: скопировали не весь файл, без внешних { }
+            raw = "{" + raw + "}"
+        try:
+            info = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "GOOGLE_CREDS_JSON повреждён — похоже, скопирован не весь "
+                "JSON-файл ключа целиком (от первой { до последней }). "
+                f"Исходная ошибка: {exc}"
+            ) from exc
         creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     else:
         # ключ лежит файлом рядом с ботом (VPS)
@@ -59,35 +70,102 @@ class DriverNotFound(Exception):
     pass
 
 
-def get_salary_info(fio: str) -> dict:
+RU_MONTHS = {
+    "январь": 1, "февраль": 2, "март": 3, "апрель": 4,
+    "май": 5, "июнь": 6, "июль": 7, "август": 8,
+    "сентябрь": 9, "октябрь": 10, "ноябрь": 11, "декабрь": 12,
+}
+
+
+def _parse_period(text: str) -> tuple[int, int]:
+    """Пытается разобрать период вида 'июль 26' / 'Август 26' в (год, месяц)
+    для сортировки. Если не получилось — возвращает (-1, -1), такие строки
+    уйдут в конец списка (как самые старые/неизвестные)."""
+    parts = _normalize(text).split()
+    if len(parts) < 2:
+        return (-1, -1)
+    month = RU_MONTHS.get(parts[0])
+    if month is None:
+        return (-1, -1)
+    try:
+        year = int(parts[1])
+    except ValueError:
+        return (-1, -1)
+    if year < 100:
+        year += 2000
+    return (year, month)
+
+
+def get_salary_history(fio: str) -> list[dict]:
     """
-    Ищет строку по ФИО в таблице зарплат и возвращает словарь
-    {"oklad": ..., "premiya_den": ..., "itogo_premiya": ...}.
-    Сравнение ФИО и названий столбцов регистронезависимое, лишние пробелы
-    в заголовках игнорируются.
+    Возвращает список записей по ФИО — по одной на каждый месяц, где он
+    встретился в таблице, отсортированный от новых к старым:
+    [{"period": "Август 26", "oklad": ..., "premiya_den": ...,
+      "itogo_premiya": ...}, ...]
+
+    Месяц/период берётся из столбца, идущего сразу ПОСЛЕ столбца ФИО —
+    у него в этой таблице нет текста в заголовке, поэтому искать по имени
+    столбца нельзя, используется его позиция.
     """
     if not config.SALARY_SHEET_ID:
         raise RuntimeError("SALARY_SHEET_ID не задан в переменных окружения")
 
     ws = _open_worksheet(config.SALARY_SHEET_ID, config.SALARY_WORKSHEET_NAME)
-    records = ws.get_all_records()  # список dict по заголовкам первой строки
+    all_values = ws.get_all_values()  # список списков: [ [заголовки], [строка1], ... ]
+    if not all_values:
+        raise DriverNotFound("Таблица пуста")
+
+    headers = all_values[0]
+    # для каждого нормализованного названия столбца запоминаем ПЕРВЫЙ индекс,
+    # где оно встретилось — так дубликаты/пустые заголовки не ломают поиск
+    header_index: dict[str, int] = {}
+    for idx, h in enumerate(headers):
+        key = _normalize(h)
+        if key and key not in header_index:
+            header_index[key] = idx
+
+    def col(name: str) -> Optional[int]:
+        return header_index.get(_normalize(name))
+
+    idx_fio = col(config.COL_FIO)
+    if idx_fio is None:
+        raise RuntimeError(
+            f"В листе '{config.SALARY_WORKSHEET_NAME}' не найден столбец "
+            f"'{config.COL_FIO}'. Проверьте точное название заголовка в таблице."
+        )
+    idx_month = idx_fio + 1  # столбец периода — сразу справа от ФИО, без заголовка
+    idx_oklad = col(config.COL_OKLAD)
+    idx_premiya_den = col(config.COL_PREMIYA_DEN_NDS)
+    idx_itogo = col(config.COL_ITOGO_PREMIYA_NDS)
 
     fio_norm = _normalize(fio)
-    col_fio = _normalize(config.COL_FIO)
-    col_oklad = _normalize(config.COL_OKLAD)
-    col_premiya_den = _normalize(config.COL_PREMIYA_DEN_NDS)
-    col_itogo = _normalize(config.COL_ITOGO_PREMIYA_NDS)
 
-    for row in records:
-        row_norm = {_normalize(k): v for k, v in row.items()}
-        if _normalize(row_norm.get(col_fio, "")) == fio_norm:
-            return {
-                "oklad": row_norm.get(col_oklad, "—"),
-                "premiya_den": row_norm.get(col_premiya_den, "—"),
-                "itogo_premiya": row_norm.get(col_itogo, "—"),
-            }
+    def get_cell(row: list, idx: Optional[int]) -> str:
+        if idx is None or idx >= len(row):
+            return "—"
+        return row[idx] or "—"
 
-    raise DriverNotFound(f"Водитель с ФИО '{fio}' не найден в таблице")
+    results = []
+    for row in all_values[1:]:
+        if idx_fio < len(row) and _normalize(row[idx_fio]) == fio_norm:
+            period = get_cell(row, idx_month)
+            results.append(
+                {
+                    "period": period if period != "—" else "(без периода)",
+                    "oklad": get_cell(row, idx_oklad),
+                    "premiya_den": get_cell(row, idx_premiya_den),
+                    "itogo_premiya": get_cell(row, idx_itogo),
+                    "_sort_key": _parse_period(period),
+                }
+            )
+
+    if not results:
+        raise DriverNotFound(f"Водитель с ФИО '{fio}' не найден в таблице")
+
+    results.sort(key=lambda r: r["_sort_key"], reverse=True)
+    for r in results:
+        del r["_sort_key"]
+    return results
 
 
 def log_inspection(driver_fio: str, vehicle_number: str, summary: dict) -> None:
@@ -120,6 +198,7 @@ def log_inspection(driver_fio: str, vehicle_number: str, summary: dict) -> None:
                 driver_fio,
                 vehicle_number,
                 summary.get("odometer_km", ""),
+                summary.get("fuel_level", ""),
                 damages_str,
                 auto_flagged_str,
                 missing_str,
