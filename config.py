@@ -11,7 +11,7 @@ from pathlib import Path
 # Основные настройки
 # ---------------------------------------------------------------------------
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 # Путь к JSON-ключу сервисного аккаунта Google (используется, если ключ лежит
 # файлом рядом с ботом — вариант для VPS)
@@ -20,13 +20,13 @@ GOOGLE_CREDS_PATH = os.environ.get("GOOGLE_CREDS_PATH", "google_credentials.json
 # Альтернатива: содержимое JSON-ключа целиком в переменной окружения
 # (удобно для Railway/Render, где нет смысла хранить файл) — если задано,
 # имеет приоритет над GOOGLE_CREDS_PATH
-GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
+GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "").strip()
 
 # ID / ссылка на Google-таблицу с зарплатами
 # Можно указать либо полный URL таблицы, либо просто её ID (часть URL между
 # /d/ и /edit)
-SALARY_SHEET_ID = os.environ.get("SALARY_SHEET_ID", "12g7kMabtIDHwawHacQKkeZ6dkGi8URF4OoYWjEAIQ-M")
-SALARY_WORKSHEET_NAME = os.environ.get("SALARY_WORKSHEET_NAME", "зп водители")
+SALARY_SHEET_ID = os.environ.get("SALARY_SHEET_ID", "12g7kMabtIDHwawHacQKkeZ6dkGi8URF4OoYWjEAIQ-M").strip()
+SALARY_WORKSHEET_NAME = os.environ.get("SALARY_WORKSHEET_NAME", "зп водители").strip()
 
 # Названия столбцов в таблице зарплат (регистр важен — должен совпадать
 # с шапкой таблицы)
