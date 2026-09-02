@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import datetime
 from functools import lru_cache
 from typing import Optional
@@ -28,9 +30,22 @@ SCOPES = [
 ]
 
 
+def _normalize(text: str) -> str:
+    """Убирает лишние пробелы и приводит к нижнему регистру — чтобы
+    различия вроде "Премия день  С НДС" и "премия день с ндс" считались
+    одним и тем же столбцом."""
+    return re.sub(r"\s+", " ", str(text).strip()).lower()
+
+
 @lru_cache(maxsize=1)
 def _get_client() -> gspread.Client:
-    creds = Credentials.from_service_account_file(config.GOOGLE_CREDS_PATH, scopes=SCOPES)
+    if config.GOOGLE_CREDS_JSON:
+        # ключ передан целиком через переменную окружения (Railway/Render)
+        info = json.loads(config.GOOGLE_CREDS_JSON)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    else:
+        # ключ лежит файлом рядом с ботом (VPS)
+        creds = Credentials.from_service_account_file(config.GOOGLE_CREDS_PATH, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -47,8 +62,9 @@ class DriverNotFound(Exception):
 def get_salary_info(fio: str) -> dict:
     """
     Ищет строку по ФИО в таблице зарплат и возвращает словарь
-    {"oklad": ..., "procenty": ..., "premiya": ...}.
-    Сравнение ФИО регистронезависимое и с обрезкой пробелов.
+    {"oklad": ..., "premiya_den": ..., "itogo_premiya": ...}.
+    Сравнение ФИО и названий столбцов регистронезависимое, лишние пробелы
+    в заголовках игнорируются.
     """
     if not config.SALARY_SHEET_ID:
         raise RuntimeError("SALARY_SHEET_ID не задан в переменных окружения")
@@ -56,14 +72,19 @@ def get_salary_info(fio: str) -> dict:
     ws = _open_worksheet(config.SALARY_SHEET_ID, config.SALARY_WORKSHEET_NAME)
     records = ws.get_all_records()  # список dict по заголовкам первой строки
 
-    fio_norm = fio.strip().lower()
+    fio_norm = _normalize(fio)
+    col_fio = _normalize(config.COL_FIO)
+    col_oklad = _normalize(config.COL_OKLAD)
+    col_premiya_den = _normalize(config.COL_PREMIYA_DEN_NDS)
+    col_itogo = _normalize(config.COL_ITOGO_PREMIYA_NDS)
+
     for row in records:
-        row_fio = str(row.get(config.COL_FIO, "")).strip().lower()
-        if row_fio == fio_norm:
+        row_norm = {_normalize(k): v for k, v in row.items()}
+        if _normalize(row_norm.get(col_fio, "")) == fio_norm:
             return {
-                "oklad": row.get(config.COL_OKLAD, "—"),
-                "procenty": row.get(config.COL_PROCENTY, "—"),
-                "premiya": row.get(config.COL_PREMIYA, "—"),
+                "oklad": row_norm.get(col_oklad, "—"),
+                "premiya_den": row_norm.get(col_premiya_den, "—"),
+                "itogo_premiya": row_norm.get(col_itogo, "—"),
             }
 
     raise DriverNotFound(f"Водитель с ФИО '{fio}' не найден в таблице")

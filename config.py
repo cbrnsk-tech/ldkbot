@@ -13,22 +13,27 @@ from pathlib import Path
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-# Путь к JSON-ключу сервисного аккаунта Google (см. README.md, раздел
-# "Настройка Google Sheets")
+# Путь к JSON-ключу сервисного аккаунта Google (используется, если ключ лежит
+# файлом рядом с ботом — вариант для VPS)
 GOOGLE_CREDS_PATH = os.environ.get("GOOGLE_CREDS_PATH", "google_credentials.json")
+
+# Альтернатива: содержимое JSON-ключа целиком в переменной окружения
+# (удобно для Railway/Render, где нет смысла хранить файл) — если задано,
+# имеет приоритет над GOOGLE_CREDS_PATH
+GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
 
 # ID / ссылка на Google-таблицу с зарплатами
 # Можно указать либо полный URL таблицы, либо просто её ID (часть URL между
 # /d/ и /edit)
-SALARY_SHEET_ID = os.environ.get("SALARY_SHEET_ID", "")
-SALARY_WORKSHEET_NAME = os.environ.get("SALARY_WORKSHEET_NAME", "Зарплата")
+SALARY_SHEET_ID = os.environ.get("SALARY_SHEET_ID", "12g7kMabtIDHwawHacQKkeZ6dkGi8URF4OoYWjEAIQ-M")
+SALARY_WORKSHEET_NAME = os.environ.get("SALARY_WORKSHEET_NAME", "зп водители")
 
 # Названия столбцов в таблице зарплат (регистр важен — должен совпадать
 # с шапкой таблицы)
 COL_FIO = "ФИО"
-COL_OKLAD = "Оклад"
-COL_PROCENTY = "Проценты"
-COL_PREMIYA = "Премия"
+COL_OKLAD = "ОКЛАД"
+COL_PREMIYA_DEN_NDS = "Премия день С НДС"
+COL_ITOGO_PREMIYA_NDS = "ИТОГО Премия С НДС"
 
 # Таблица-лог осмотров (опционально, если пусто — лог в таблицу не пишется,
 # только в локальные файлы)
